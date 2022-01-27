@@ -122,8 +122,6 @@ module OmniAuth
       end
 
       def callback_phase
-        # params nil
-        debugger
         error = params['error_reason'] || params['error']
         error_description = params['error_description'] || params['error_reason']
         invalid_state = params['state'].to_s.empty? || params['state'] != stored_state
@@ -168,7 +166,6 @@ module OmniAuth
       end
 
       def end_session_uri
-
         return unless end_session_endpoint_is_valid?
 
         end_session_uri = URI(client_options.end_session_endpoint)
