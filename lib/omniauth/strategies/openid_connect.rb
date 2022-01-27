@@ -33,9 +33,6 @@ module OmniAuth
                               userinfo_endpoint: '/userinfo',
                               jwks_uri: '/jwk',
                               end_session_endpoint: nil,
-                              code_challenge_method: 'S256',
-                              code_verifier: SecureRandom.hex(32),
-                              code_challenge: nil
                             )
 
       option :issuer
@@ -61,7 +58,17 @@ module OmniAuth
       option :extra_authorize_params, {}
       option :uid_field, 'sub'
       option :auth_scheme, :basic_auth
-
+      option :pkce, false
+      option :pkce_verifier, nil
+      option :pkce_options, {
+        code_challenge: proc { |verifier|
+          Base64.urlsafe_encode64(
+            Digest::SHA2.digest(verifier),
+            padding: false,
+            )
+        },
+        code_challenge_method: "S256",
+      }
 
       def uid
         user_info.raw_attributes[options.uid_field.to_sym] || user_info.sub
@@ -96,7 +103,6 @@ module OmniAuth
       end
 
       def client
-
         @client ||= ::OpenIDConnect::Client.new(client_options)
       end
 
@@ -106,7 +112,6 @@ module OmniAuth
       end
 
       def request_phase
-
         if client_options.scheme == "http"
           WebFinger.url_builder = URI::HTTP
           SWD.url_builder = URI::HTTP
@@ -159,7 +164,6 @@ module OmniAuth
       end
 
       def authorization_code
-
         params['code']
       end
 
@@ -186,14 +190,32 @@ module OmniAuth
           nonce: (new_nonce if options.send_nonce),
           hd: options.hd,
           acr_values: options.acr_values,
-          code_challenge: Base64.encode64(Digest::SHA256.hexdigest(options.client_options.code_verifier)),
-          code_challenge_method: 'S256',
-          code_verifier: options.client_options.code_verifier
         }
 
         opts.merge!(options.extra_authorize_params) unless options.extra_authorize_params.empty?
 
+        if options.pkce
+          opts.merge!(pkce_authorize_params)
+          session["omniauth.pkce.verifier"] = options.pkce_verifier
+        end
+
         client.authorization_uri(opts.reject { |_k, v| v.nil? })
+      end
+
+      def pkce_authorize_params
+        options.pkce_verifier = SecureRandom.hex(64) if options.pkce_verifier.nil?
+
+        # NOTE: see https://tools.ietf.org/html/rfc7636#appendix-A
+        {
+          :code_challenge => options.pkce_options[:code_challenge].call(options.pkce_verifier),
+          :code_challenge_method => options.pkce_options[:code_challenge_method],
+        }
+      end
+
+      def pkce_token_params
+        return {} unless options.pkce
+
+        {:code_verifier => session.delete("omniauth.pkce.verifier")}
       end
 
       def public_key
@@ -205,14 +227,12 @@ module OmniAuth
       private
 
       def issuer
-
         resource = "#{ client_options.scheme }://#{ client_options.host }"
         resource = "#{ resource }:#{ client_options.port }" if client_options.port
         ::OpenIDConnect::Discovery::Provider.discover!(resource).issuer
       end
 
-      def discover!
-        
+      def discover!        
         return unless options.discovery
 
         client_options.authorization_endpoint = config.authorization_endpoint
@@ -222,8 +242,7 @@ module OmniAuth
         client_options.end_session_endpoint = config.end_session_endpoint if config.respond_to?(:end_session_endpoint)
       end
 
-      def user_info
-        
+      def user_info        
         return @user_info if @user_info
 
         if access_token.id_token
@@ -236,12 +255,11 @@ module OmniAuth
       end
 
       def access_token
-        debugger
         return @access_token if @access_token
 
         @access_token = client.access_token!(scope: (options.scope if options.send_scope_to_token_endpoint),
                                              client_auth_method: options.client_auth_method,
-                                             code_verifier: options.client_options.code_verifier)
+                                             code_verifier: (session.delete("omniauth.pkce.verifier") if options.pkce))
 
         verify_id_token!(@access_token.id_token) if configured_response_type == 'code'
 
@@ -249,17 +267,14 @@ module OmniAuth
       end
 
       def decode_id_token(id_token)
-        
         ::OpenIDConnect::ResponseObject::IdToken.decode(id_token, public_key)
       end
 
-      def client_options
-        
+      def client_options        
         options.client_options
       end
 
-      def new_state
-        
+      def new_state        
         state = if options.state.respond_to?(:call)
                   if options.state.arity == 1
                     options.state.call(env)
@@ -275,13 +290,11 @@ module OmniAuth
         session.delete('omniauth.state')
       end
 
-      def new_nonce
-        
+      def new_nonce        
         session['omniauth.nonce'] = SecureRandom.hex(16)
       end
 
-      def stored_nonce
-        
+      def stored_nonce        
         session.delete('omniauth.nonce')
       end
 
@@ -297,8 +310,7 @@ module OmniAuth
         super
       end
 
-      def key_or_secret
-        
+      def key_or_secret        
         case options.client_signing_alg
         when :HS256, :HS384, :HS512
           client_options.secret
@@ -311,33 +323,28 @@ module OmniAuth
         end
       end
 
-      def parse_x509_key(key)
-        
+      def parse_x509_key(key)        
         OpenSSL::X509::Certificate.new(key).public_key
       end
 
-      def parse_jwk_key(key)
-        
+      def parse_jwk_key(key)        
         json = JSON.parse(key)
         return JSON::JWK::Set.new(json['keys']) if json.key?('keys')
 
         JSON::JWK.new(json)
       end
 
-      def decode(str)
-        
+      def decode(str)        
         UrlSafeBase64.decode64(str).unpack1('B*').to_i(2).to_s
       end
 
-      def redirect_uri
-        
+      def redirect_uri        
         return client_options.redirect_uri unless params['redirect_uri']
 
         "#{ client_options.redirect_uri }?redirect_uri=#{ CGI.escape(params['redirect_uri']) }"
       end
 
-      def encoded_post_logout_redirect_uri
-        
+      def encoded_post_logout_redirect_uri        
         return unless options.post_logout_redirect_uri
 
         URI.encode_www_form(
@@ -345,19 +352,16 @@ module OmniAuth
         )
       end
 
-      def end_session_endpoint_is_valid?
-        
+      def end_session_endpoint_is_valid?        
         client_options.end_session_endpoint &&
           client_options.end_session_endpoint =~ URI::DEFAULT_PARSER.make_regexp
       end
 
-      def logout_path_pattern
-        
+      def logout_path_pattern      
         @logout_path_pattern ||= %r{\A#{Regexp.quote(request_path)}(/logout)}
       end
 
-      def id_token_callback_phase
-        
+      def id_token_callback_phase        
         user_data = decode_id_token(params['id_token']).raw_attributes
         env['omniauth.auth'] = AuthHash.new(
           provider: name,
@@ -368,8 +372,7 @@ module OmniAuth
         call_app!
       end
 
-      def valid_response_type?
-        
+      def valid_response_type?        
         return true if params.key?(configured_response_type)
 
         error_attrs = RESPONSE_TYPE_EXCEPTIONS[configured_response_type]
@@ -382,8 +385,7 @@ module OmniAuth
         @configured_response_type ||= options.response_type.to_s
       end
 
-      def verify_id_token!(id_token)
-        
+      def verify_id_token!(id_token)        
         return unless id_token
 
         decode_id_token(id_token).verify!(issuer: options.issuer,
